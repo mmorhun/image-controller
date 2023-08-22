@@ -117,6 +117,12 @@ type CredentialsStatus struct {
 	// PullRobotAccountName is present only if ImageRepository has labels that connect it to Application and Component.
 	// Holds name of the quay robot account with real (pull only) permissions from the generated repository.
 	PullRobotAccountName string `json:"pull-robot-account,omitempty"`
+
+	// PushRobotAccountPermissionsGranted indicated whether robot account has read/write permiossions for the image repository.
+	PushRobotAccountPermissionsGranted bool `json:"push-robot-account-permissions,omitempty"`
+
+	// PullRobotAccountPermissionsGranted indicated whether robot account has read permiossions for the image repository.
+	PullRobotAccountPermissionsGranted bool `json:"pull-robot-account-permissions,omitempty"`
 }
 
 //+kubebuilder:object:root=true

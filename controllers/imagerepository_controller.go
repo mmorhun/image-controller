@@ -110,12 +110,9 @@ func (r *ImageRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	r.QuayClient = r.BuildQuayClient(log)
 
 	// Provision image repository if it hasn't been done yet
-	if !controllerutil.ContainsFinalizer(imageRepository, ImageRepositoryFinalizer) {
-		if err := r.ProvisionImageRepository(ctx, imageRepository); err != nil {
-			log.Error(err, "provision of image repository failed")
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	if !controllerutil.ContainsFinalizer(imageRepository, ImageRepositoryFinalizer) ||
+		imageRepository.Status.State != imagerepositoryv1beta1.ImageRepositoryStateReady {
+		return ctrl.Result{}, r.ProvisionImageRepository(ctx, imageRepository)
 	}
 
 	if imageRepository.Status.State != imagerepositoryv1beta1.ImageRepositoryStateReady {
@@ -124,7 +121,7 @@ func (r *ImageRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Make sure, that image repository name is the same as on creation.
 	// Do it here to avoid webhook creation.
-	imageRepositoryName := strings.TrimPrefix(imageRepository.Status.Image.URL, fmt.Sprintf("quay.io/%s/", r.QuayOrganization))
+	imageRepositoryName := r.getImageRepositoryNameFromImageUrl(imageRepository.Status.Image.URL)
 	if imageRepository.Spec.Image.Name != imageRepositoryName {
 		oldName := imageRepository.Spec.Image.Name
 		imageRepository.Spec.Image.Name = imageRepositoryName
@@ -155,6 +152,14 @@ func (r *ImageRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
+func (r *ImageRepositoryReconciler) getImageRepositoryNameFromImageUrl(imageUrl string) string {
+	return strings.TrimPrefix(imageUrl, fmt.Sprintf("quay.io/%s/", r.QuayOrganization))
+}
+
+// func (r *ImageRepositoryReconciler) waitImageRepositoryState(ctx context.Context, imageRepository *imagerepositoryv1beta1.ImageRepository) (bool, error) {
+
+// }
+
 // ProvisionImageRepository creates image repository, robot account(s) and secret(s) to acces the image repository.
 // If labels with Application and Component name are present, robot account with pull only access
 // will be created and pull token will be propagated to all environments via Remote Secret.
@@ -162,121 +167,252 @@ func (r *ImageRepositoryReconciler) ProvisionImageRepository(ctx context.Context
 	log := ctrllog.FromContext(ctx).WithName("ImageRepositoryProvision")
 	ctx = ctrllog.IntoContext(ctx, log)
 
+	var err error
+
+	status := imageRepository.Status
+
+	// Create image repository
+	var quayImageURL string
 	imageRepositoryName := ""
-	if imageRepository.Spec.Image.Name == "" {
-		imageRepositoryName = imageRepository.Namespace + "-" + imageRepository.Name
-	} else {
-		imageRepositoryName = imageRepository.Namespace + "-" + imageRepository.Spec.Image.Name
-	}
-
-	if imageRepository.Spec.Image.Visibility == "" {
-		imageRepository.Spec.Image.Visibility = imagerepositoryv1beta1.ImageVisibilityPublic
-	}
-	visibility := string(imageRepository.Spec.Image.Visibility)
-
-	repository, err := r.QuayClient.CreateRepository(quay.RepositoryRequest{
-		Namespace:   r.QuayOrganization,
-		Repository:  imageRepositoryName,
-		Visibility:  visibility,
-		Description: "AppStudio repository for the user",
-	})
-	if err != nil {
-		log.Error(err, "failed to create image repository", l.Action, l.ActionAdd, l.Audit, "true")
-		imageRepository.Status.State = imagerepositoryv1beta1.ImageRepositoryStateFailed
-		if err.Error() == "payment required" {
-			imageRepository.Status.Message = "Number of private repositories exceeds current quay plan limit"
-		} else {
-			imageRepository.Status.Message = err.Error()
+	if imageRepository.Status.Image.URL == "" {
+		if imageRepository.Spec.Image.Name == "" {
+			imageRepositoryName = imageRepository.Namespace + "-" + imageRepository.Name
+		} else if !strings.HasPrefix(imageRepository.Spec.Image.Name, imageRepository.Namespace) {
+			imageRepositoryName = imageRepository.Namespace + "-" + imageRepository.Spec.Image.Name
 		}
-		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
-			log.Error(err, "failed to update image repository status")
+
+		if imageRepository.Spec.Image.Visibility == "" {
+			imageRepository.Spec.Image.Visibility = imagerepositoryv1beta1.ImageVisibilityPublic
 		}
-		return nil
-	}
-	if repository == nil {
-		err := fmt.Errorf("unexpected response from Quay: created image repository data object is nil")
-		log.Error(err, "nil repository")
-		return err
-	}
+		visibility := string(imageRepository.Spec.Image.Visibility)
 
-	robotAccountName := generateQuayRobotAccountName(imageRepositoryName, false)
-	robotAccount, err := r.QuayClient.CreateRobotAccount(r.QuayOrganization, robotAccountName)
-	if err != nil {
-		log.Error(err, "failed to create robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionAdd, l.Audit, "true")
-		return err
-	}
-	if robotAccount == nil {
-		err := fmt.Errorf("unexpected response from Quay: robot account data object is nil")
-		log.Error(err, "nil robot account")
-		return err
-	}
-
-	err = r.QuayClient.AddPermissionsForRepositoryToRobotAccount(r.QuayOrganization, repository.Name, robotAccount.Name, true)
-	if err != nil {
-		log.Error(err, "failed to add permissions to robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionUpdate, l.Audit, "true")
-		return err
-	}
-
-	quayImageURL := fmt.Sprintf("quay.io/%s/%s", r.QuayOrganization, repository.Name)
-	secretName := strings.ReplaceAll(robotAccountName, "_", "-")
-	if err := r.EnsureDockerSecret(ctx, imageRepository, robotAccount, secretName, quayImageURL); err != nil {
-		return err
-	}
-
-	status := imagerepositoryv1beta1.ImageRepositoryStatus{}
-	if isComponentLinked(imageRepository) {
-		// Pull secret provision and propagation
-		pullRobotAccountName := generateQuayRobotAccountName(imageRepositoryName, true)
-		pullRobotAccount, err := r.QuayClient.CreateRobotAccount(r.QuayOrganization, pullRobotAccountName)
+		repository, err := r.QuayClient.CreateRepository(quay.RepositoryRequest{
+			Namespace:   r.QuayOrganization,
+			Repository:  imageRepositoryName,
+			Visibility:  visibility,
+			Description: "AppStudio repository for the user",
+		})
 		if err != nil {
-			log.Error(err, "failed to create pull robot account", "RobotAccountName", pullRobotAccountName, l.Action, l.ActionAdd, l.Audit, "true")
+			log.Error(err, "failed to create image repository", l.Action, l.ActionAdd, l.Audit, "true")
+			if err.Error() == "payment required" {
+				status.State = imagerepositoryv1beta1.ImageRepositoryStateFailed
+				status.Message = "Number of private repositories exceeds current quay plan limit"
+				imageRepository.Status = status
+				if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+					log.Error(err, "failed to update image repository status")
+					return err
+				}
+				return nil
+			}
+			// Temporary API error, retry
+			return err
+		}
+		if repository == nil {
+			err := fmt.Errorf("unexpected response from Quay: created image repository data object is nil")
+			log.Error(err, "nil repository")
+			return err
+		}
+
+		quayImageURL := fmt.Sprintf("quay.io/%s/%s", r.QuayOrganization, repository.Name)
+		status.Image.URL = quayImageURL
+		status.Image.Visibility = imageRepository.Spec.Image.Visibility
+
+		// Update Spec and Status
+		imageRepository.Spec.Image.Name = imageRepositoryName
+		controllerutil.AddFinalizer(imageRepository, ImageRepositoryFinalizer)
+		if err := r.Client.Update(ctx, imageRepository); err != nil {
+			log.Error(err, "failed to update CR after provision")
+			return err
+		} else {
+			log.Info("added image repository finalizer")
+		}
+
+		imageRepository.Status = status
+		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+			log.Error(err, "failed to update CR status")
+			return err
+		}
+
+		// Wait actual state of the image repository to be read.
+		imageRepositoryKey := types.NamespacedName{Namespace: imageRepository.Namespace, Name: imageRepository.Name}
+		for i := 0; i < 5; i++ {
+			if err = r.Client.Get(ctx, imageRepositoryKey, imageRepository); err == nil {
+				if controllerutil.ContainsFinalizer(imageRepository, ImageRepositoryFinalizer) && imageRepository.Status.Image.URL != "" {
+					break
+				}
+				// Outdated version of the image repository object, wait more.
+			} else {
+				if errors.IsNotFound(err) {
+					// The image repository was deleted
+					break
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		return nil
+	} else {
+		quayImageURL = imageRepository.Status.Image.URL
+		imageRepositoryName = r.getImageRepositoryNameFromImageUrl(quayImageURL)
+	}
+
+	// Create push robot account
+	var robotAccount *quay.RobotAccount
+	robotAccountName := ""
+	if imageRepository.Status.Credentials.PushRobotAccountName == "" {
+		robotAccountName = generateQuayRobotAccountName(imageRepositoryName, false)
+		robotAccount, err = r.QuayClient.CreateRobotAccount(r.QuayOrganization, robotAccountName)
+		if err != nil {
+			log.Error(err, "failed to create robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionAdd, l.Audit, "true")
 			return err
 		}
 		if robotAccount == nil {
-			err := fmt.Errorf("unexpected response from Quay: pull robot account data object is nil")
-			log.Error(err, "nil pull robot account")
+			err := fmt.Errorf("unexpected response from Quay: robot account data object is nil")
+			log.Error(err, "nil robot account")
 			return err
 		}
 
-		err = r.QuayClient.AddPermissionsForRepositoryToRobotAccount(r.QuayOrganization, repository.Name, pullRobotAccount.Name, false)
-		if err != nil {
-			log.Error(err, "failed to add permissions to pull robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionUpdate, l.Audit, "true")
+		status.Credentials.PushRobotAccountName = robotAccountName
+		imageRepository.Status = status
+		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+			log.Error(err, "failed to update CR status with push robot account name")
 			return err
+		}
+	} else {
+		robotAccountName = imageRepository.Status.Credentials.PushRobotAccountName
+		robotAccount, err = r.QuayClient.GetRobotAccount(r.QuayOrganization, robotAccountName)
+		if err != nil {
+			log.Error(err, "failed to get push robot account", l.Action, l.ActionView, l.Audit, "true")
+			return err
+		}
+		if robotAccount == nil {
+			err := fmt.Errorf("unexpected response from Quay: robot account data object is nil")
+			log.Error(err, "nil robot account")
+			return err
+		}
+	}
+
+	if !imageRepository.Status.Credentials.PushRobotAccountPermissionsGranted {
+		err = r.QuayClient.AddPermissionsForRepositoryToRobotAccount(r.QuayOrganization, imageRepositoryName, robotAccountName, true)
+		if err != nil {
+			log.Error(err, "failed to add permissions to robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionUpdate, l.Audit, "true")
+			return err
+		}
+
+		status.Credentials.PushRobotAccountPermissionsGranted = true
+		imageRepository.Status = status
+		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+			log.Error(err, "failed to update CR status with push robot account permissions flag")
+			return err
+		}
+	}
+
+	secretName := strings.ReplaceAll(robotAccountName, "_", "-")
+	if err := r.EnsureDockerSecret(ctx, imageRepository, robotAccount, secretName, quayImageURL); err != nil {
+		log.Error(err, "failed to ensure push secret")
+		return err
+	} else if imageRepository.Status.Credentials.PushSecretName == "" {
+		status.Credentials.PushSecretName = secretName
+		imageRepository.Status = status
+		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+			log.Error(err, "failed to update CR status with push secret name")
+			return err
+		}
+	}
+
+	if isComponentLinked(imageRepository) {
+		// Pull secret provision and propagation
+		var pullRobotAccount *quay.RobotAccount
+		pullRobotAccountName := ""
+		if imageRepository.Status.Credentials.PullRobotAccountName == "" {
+			pullRobotAccountName = generateQuayRobotAccountName(imageRepositoryName, true)
+			pullRobotAccount, err = r.QuayClient.CreateRobotAccount(r.QuayOrganization, pullRobotAccountName)
+			if err != nil {
+				log.Error(err, "failed to create pull robot account", "RobotAccountName", pullRobotAccountName, l.Action, l.ActionAdd, l.Audit, "true")
+				return err
+			}
+			if robotAccount == nil {
+				err := fmt.Errorf("unexpected response from Quay: pull robot account data object is nil")
+				log.Error(err, "nil pull robot account")
+				return err
+			}
+
+			status.Credentials.PullRobotAccountName = pullRobotAccountName
+			imageRepository.Status = status
+			if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+				log.Error(err, "failed to update CR status with pull robot account name")
+				return err
+			}
+		} else {
+			pullRobotAccountName = imageRepository.Status.Credentials.PullRobotAccountName
+			pullRobotAccount, err = r.QuayClient.GetRobotAccount(r.QuayOrganization, pullRobotAccountName)
+			if err != nil {
+				log.Error(err, "failed to get pull robot account", l.Action, l.ActionView, l.Audit, "true")
+				return err
+			}
+			if pullRobotAccount == nil {
+				err := fmt.Errorf("unexpected response from Quay: robot account data object is nil")
+				log.Error(err, "nil robot account")
+				return err
+			}
+		}
+
+		if !imageRepository.Status.Credentials.PullRobotAccountPermissionsGranted {
+			err = r.QuayClient.AddPermissionsForRepositoryToRobotAccount(r.QuayOrganization, imageRepositoryName, pullRobotAccount.Name, false)
+			if err != nil {
+				log.Error(err, "failed to add permissions to pull robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionUpdate, l.Audit, "true")
+				return err
+			}
+
+			status.Credentials.PullRobotAccountPermissionsGranted = true
+			imageRepository.Status = status
+			if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+				log.Error(err, "failed to update CR status will pull robot account permissions flag")
+				return err
+			}
 		}
 
 		remoteSecretName := getRemoteSecretName(imageRepository)
 		if err := r.EnsureRemotePullSecret(ctx, imageRepository, remoteSecretName); err != nil {
 			return err
 		}
-
 		if err := r.CreateRemotePullSecretUploadSecret(ctx, pullRobotAccount, imageRepository.Namespace, remoteSecretName, quayImageURL); err != nil {
 			return err
 		}
-
-		status.Credentials.PullRobotAccountName = pullRobotAccountName
-		status.Credentials.PullSecretName = remoteSecretName
+		if imageRepository.Status.Credentials.PullSecretName == "" {
+			status.Credentials.PullSecretName = remoteSecretName
+			imageRepository.Status = status
+			if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
+				log.Error(err, "failed to update CR status with pull secret name")
+				return err
+			}
+		}
 	}
 
 	status.State = imagerepositoryv1beta1.ImageRepositoryStateReady
-	status.Image.URL = quayImageURL
-	status.Image.Visibility = imageRepository.Spec.Image.Visibility
-	status.Credentials.PushRobotAccountName = robotAccountName
-	status.Credentials.PushSecretName = secretName
 	status.Credentials.GenerationTimestamp = &metav1.Time{Time: time.Now()}
-
-	imageRepository.Spec.Image.Name = imageRepositoryName
-	controllerutil.AddFinalizer(imageRepository, ImageRepositoryFinalizer)
-	if err := r.Client.Update(ctx, imageRepository); err != nil {
-		log.Error(err, "failed to update CR after provision")
-		return err
-	} else {
-		log.Info("provisioned image repository and added finalizer")
-	}
-
 	imageRepository.Status = status
 	if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
-		log.Error(err, "failed to update CR status after provision")
+		log.Error(err, "failed to update CR status to ready state")
 		return err
+	}
+	log.Info("successfully provisioned image repository")
+
+	// Wait actual state of the image repository to be read.
+	imageRepositoryKey := types.NamespacedName{Namespace: imageRepository.Namespace, Name: imageRepository.Name}
+	for i := 0; i < 5; i++ {
+		if err = r.Client.Get(ctx, imageRepositoryKey, imageRepository); err == nil {
+			if imageRepository.Status.State != "" {
+				break
+			}
+			// Outdated version of the image repository object, wait more.
+		} else {
+			if errors.IsNotFound(err) {
+				// The image repository was deleted
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	return nil
@@ -315,21 +451,12 @@ func (r *ImageRepositoryReconciler) RegenerateImageRepositoryCredentials(ctx con
 		log.Info("Regenerated pull token", "RobotAccountName", pullRobotAccountName)
 	}
 
-	// if err := r.Client.Get(ctx, imageRepositoryKey, imageRepository); err != nil {
-	// 	log.Error(err, "failed to get image repository")
-	// 	return err
-	// }
 	imageRepository.Spec.Credentials.RegenerateToken = nil
 	if err := r.Client.Update(ctx, imageRepository); err != nil {
 		log.Error(err, "failed to update image repository", l.Action, l.ActionUpdate)
 		return err
 	}
 
-	// imageRepositoryKey := types.NamespacedName{Namespace: imageRepository.Namespace, Name: imageRepository.Name}
-	// if err := r.Client.Get(ctx, imageRepositoryKey, imageRepository); err != nil {
-	// 	log.Error(err, "failed to get image repository")
-	// 	return err
-	// }
 	imageRepository.Status.Credentials.GenerationTimestamp = &metav1.Time{Time: time.Now()}
 	if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
 		log.Error(err, "failed to update image repository status", l.Action, l.ActionUpdate)
@@ -344,22 +471,26 @@ func (r *ImageRepositoryReconciler) CleanupImageRepository(ctx context.Context, 
 	log := ctrllog.FromContext(ctx).WithName("RepositoryCleanup")
 
 	robotAccountName := imageRepository.Status.Credentials.PushRobotAccountName
-	isRobotAccountDeleted, err := r.QuayClient.DeleteRobotAccount(r.QuayOrganization, robotAccountName)
-	if err != nil {
-		log.Error(err, "failed to delete push robot account", l.Action, l.ActionDelete, l.Audit, "true")
-	}
-	if isRobotAccountDeleted {
-		log.Info("Deleted push robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionDelete)
+	if robotAccountName != "" {
+		isRobotAccountDeleted, err := r.QuayClient.DeleteRobotAccount(r.QuayOrganization, robotAccountName)
+		if err != nil {
+			log.Error(err, "failed to delete push robot account", l.Action, l.ActionDelete, l.Audit, "true")
+		}
+		if isRobotAccountDeleted {
+			log.Info("Deleted push robot account", "RobotAccountName", robotAccountName, l.Action, l.ActionDelete)
+		}
 	}
 
 	if isComponentLinked(imageRepository) {
 		pullRobotAccountName := imageRepository.Status.Credentials.PullRobotAccountName
-		isPullRobotAccountDeleted, err := r.QuayClient.DeleteRobotAccount(r.QuayOrganization, pullRobotAccountName)
-		if err != nil {
-			log.Error(err, "failed to delete pull robot account", l.Action, l.ActionDelete, l.Audit, "true")
-		}
-		if isPullRobotAccountDeleted {
-			log.Info("Deleted pull robot account", "RobotAccountName", pullRobotAccountName, l.Action, l.ActionDelete)
+		if pullRobotAccountName != "" {
+			isPullRobotAccountDeleted, err := r.QuayClient.DeleteRobotAccount(r.QuayOrganization, pullRobotAccountName)
+			if err != nil {
+				log.Error(err, "failed to delete pull robot account", l.Action, l.ActionDelete, l.Audit, "true")
+			}
+			if isPullRobotAccountDeleted {
+				log.Info("Deleted pull robot account", "RobotAccountName", pullRobotAccountName, l.Action, l.ActionDelete)
+			}
 		}
 	}
 
@@ -402,11 +533,6 @@ func (r *ImageRepositoryReconciler) ChangeImageRepositoryVisibility(ctx context.
 			return err
 		}
 
-		// imageRepositoryKey := types.NamespacedName{Namespace: imageRepository.Namespace, Name: imageRepository.Name}
-		// if err := r.Client.Get(ctx, imageRepositoryKey, imageRepository); err != nil {
-		// 	log.Error(err, "failed to get image repository", l.Action, l.ActionView)
-		// 	return err
-		// }
 		imageRepository.Status.Message = "Quay organization plan private repositories limit exceeded"
 		if err := r.Client.Status().Update(ctx, imageRepository); err != nil {
 			log.Error(err, "failed to update image repository", l.Action, l.ActionUpdate)

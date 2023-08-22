@@ -284,6 +284,16 @@ func waitImageRepositoryFinalizerOnImageRepository(imageRepositoryKey types.Name
 	}, timeout, interval).Should(BeTrue())
 }
 
+func waitImageRepositoryStatus(imageRepositoryKey types.NamespacedName) {
+	imageRepository := &imagerepositoryv1beta1.ImageRepository{}
+	Eventually(func() bool {
+		if err := k8sClient.Get(ctx, imageRepositoryKey, imageRepository); err != nil {
+			return false
+		}
+		return imageRepository.Status.State != ""
+	}, timeout, interval).Should(BeTrue())
+}
+
 func createNamespace(name string) {
 	namespace := corev1.Namespace{
 		TypeMeta: metav1.TypeMeta{

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ var _ = Describe("Image repository controller", func() {
 				defer GinkgoRecover()
 				isCreateRobotAccountInvoked = true
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotName).To(HavePrefix(expectedRobotAccountPrefix))
 				return &quay.RobotAccount{Name: robotName, Token: pushToken}, nil
 			}
 			isAddPushPermissionsToRobotAccountInvoked := false
@@ -88,7 +89,7 @@ var _ = Describe("Image repository controller", func() {
 				Expect(organization).To(Equal(testQuayOrg))
 				Expect(imageRepository).To(Equal(expectedImageName))
 				Expect(isWrite).To(BeTrue())
-				Expect(strings.HasPrefix(robotAccountName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
 				return nil
 			}
 
@@ -99,6 +100,7 @@ var _ = Describe("Image repository controller", func() {
 			Eventually(func() bool { return isAddPushPermissionsToRobotAccountInvoked }, timeout, interval).Should(BeTrue())
 
 			waitImageRepositoryFinalizerOnImageRepository(resourceKey)
+			waitImageRepositoryStatus(resourceKey)
 
 			imageRepository := getImageRepository(resourceKey)
 
@@ -140,7 +142,7 @@ var _ = Describe("Image repository controller", func() {
 				defer GinkgoRecover()
 				isRegenerateRobotAccountTokenInvoked = true
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotName).To(HavePrefix(expectedRobotAccountPrefix))
 				return &quay.RobotAccount{Name: robotName, Token: newToken}, nil
 			}
 
@@ -219,7 +221,7 @@ var _ = Describe("Image repository controller", func() {
 				defer GinkgoRecover()
 				isDeleteRobotAccountInvoked = true
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotAccountName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
 				return true, nil
 			}
 			isDeleteRepositoryInvoked := false
@@ -267,7 +269,7 @@ var _ = Describe("Image repository controller", func() {
 			CreateRobotAccountFunc = func(organization, robotName string) (*quay.RobotAccount, error) {
 				defer GinkgoRecover()
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotName).To(HavePrefix(expectedRobotAccountPrefix))
 				if strings.HasSuffix(robotName, "_pull") {
 					isCreatePullRobotAccountInvoked = true
 					return &quay.RobotAccount{Name: robotName, Token: pullToken}, nil
@@ -281,7 +283,7 @@ var _ = Describe("Image repository controller", func() {
 				defer GinkgoRecover()
 				Expect(organization).To(Equal(testQuayOrg))
 				Expect(imageRepository).To(Equal(expectedImageName))
-				Expect(strings.HasPrefix(robotAccountName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
 				if strings.HasSuffix(robotAccountName, "_pull") {
 					Expect(isWrite).To(BeFalse())
 					isAddPullPermissionsToRobotAccountInvoked = true
@@ -293,7 +295,8 @@ var _ = Describe("Image repository controller", func() {
 			}
 
 			createImageRepository(imageRepositoryConfig{
-				ImageName: fmt.Sprintf("%s/%s", defaultComponentApplication, defaultComponentName),
+				ResourceKey: &resourceKey,
+				ImageName:   fmt.Sprintf("%s/%s", defaultComponentApplication, defaultComponentName),
 				Labels: map[string]string{
 					ApplicationNameLabelName: defaultComponentApplication,
 					ComponentNameLabelName:   defaultComponentName,
@@ -307,6 +310,7 @@ var _ = Describe("Image repository controller", func() {
 			Eventually(func() bool { return isAddPullPermissionsToRobotAccountInvoked }, timeout, interval).Should(BeTrue())
 
 			waitImageRepositoryFinalizerOnImageRepository(resourceKey)
+			waitImageRepositoryStatus(resourceKey)
 
 			imageRepository := getImageRepository(resourceKey)
 			Expect(imageRepository.Spec.Image.Name).To(Equal(expectedImageName))
@@ -350,6 +354,7 @@ var _ = Describe("Image repository controller", func() {
 
 			uploadSecretKey := types.NamespacedName{Name: "upload-secret-" + expectedRemoteSecretName, Namespace: defaultNamespace}
 			uploadSecret := waitSecretExist(uploadSecretKey)
+			defer deleteSecret(uploadSecretKey)
 			Expect(uploadSecret.Labels[remotesecretv1beta1.UploadSecretLabel]).To(Equal("remotesecret"))
 			Expect(uploadSecret.Annotations[remotesecretv1beta1.RemoteSecretNameAnnotation]).To(Equal(expectedRemoteSecretName))
 			uploadSecretDockerconfigJson := string(uploadSecret.Data[corev1.DockerConfigJsonKey])
@@ -359,8 +364,6 @@ var _ = Describe("Image repository controller", func() {
 			Expect(err).To(Succeed())
 			pullRobotAccountName := imageRepository.Status.Credentials.PullRobotAccountName
 			Expect(string(uploadSecretAuthString)).To(Equal(fmt.Sprintf("%s:%s", pullRobotAccountName, pullToken)))
-
-			deleteSecret(uploadSecretKey)
 		})
 
 		It("should regenerate tokens and update remote secret", func() {
@@ -376,7 +379,7 @@ var _ = Describe("Image repository controller", func() {
 			RegenerateRobotAccountTokenFunc = func(organization, robotName string) (*quay.RobotAccount, error) {
 				defer GinkgoRecover()
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotName).To(HavePrefix(expectedRobotAccountPrefix))
 				if strings.HasSuffix(robotName, "_pull") {
 					isRegenerateRobotAccountTokenForPullInvoked = true
 					return &quay.RobotAccount{Name: robotName, Token: newPullToken}, nil
@@ -436,7 +439,7 @@ var _ = Describe("Image repository controller", func() {
 			DeleteRobotAccountFunc = func(organization, robotAccountName string) (bool, error) {
 				defer GinkgoRecover()
 				Expect(organization).To(Equal(testQuayOrg))
-				Expect(strings.HasPrefix(robotAccountName, expectedRobotAccountPrefix)).To(BeTrue())
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
 				if strings.HasSuffix(robotAccountName, "_pull") {
 					isDeleteRobotAccountForPushInvoked = true
 				} else {
@@ -461,9 +464,283 @@ var _ = Describe("Image repository controller", func() {
 		})
 	})
 
+	Context("Simultaneous image repository provision with often quay API errors", func() {
+
+		It("should prepare environment", func() {
+			pushToken = "push-token1234"
+			pullToken = "pull-token1234"
+			expectedImageName = fmt.Sprintf("%s-%s/%s", defaultNamespace, defaultComponentApplication, defaultComponentName)
+			expectedImage = fmt.Sprintf("quay.io/%s/%s", testQuayOrg, expectedImageName)
+			expectedRobotAccountPrefix = strings.ReplaceAll(strings.ReplaceAll(expectedImageName, "-", "_"), "/", "_")
+		})
+
+		It("should provision image repositories for components when quay is unstable", func() {
+			nImageRepositories := 1
+			nQuayErrors := 5
+
+			createRepositoryFuncInvocations := make(map[int]int)
+			createPushRobotAccountInvocations := make(map[int]int)
+			createPullRobotAccountInvocations := make(map[int]int)
+			addPushPermissionsToRobotAccountInvocations := make(map[int]int)
+			addPullPermissionsToRobotAccountInvocations := make(map[int]int)
+			getPushRobotAccountInvocations := make(map[int]int)
+			getPullRobotAccountInvocations := make(map[int]int)
+
+			ResetTestQuayClientToFails()
+
+			CreateRepositoryFunc = func(repository quay.RepositoryRequest) (*quay.Repository, error) {
+				defer GinkgoRecover()
+				Expect(repository.Namespace).To(Equal(testQuayOrg))
+				Expect(repository.Visibility).To(Equal("public"))
+				Expect(repository.Description).ToNot(BeEmpty())
+				Expect(repository.Repository).To(HavePrefix(expectedImageName))
+				imageIndex, err := strconv.Atoi(repository.Repository[len(repository.Repository)-1:])
+				Expect(err).ToNot(HaveOccurred())
+				Expect(imageIndex > 0 && imageIndex <= nImageRepositories).To(BeTrue())
+
+				if counter, exists := createRepositoryFuncInvocations[imageIndex]; !exists {
+					createRepositoryFuncInvocations[imageIndex] = 0
+				} else {
+					if counter > nQuayErrors {
+						Fail(fmt.Sprintf("Invoked create repository %s after success", repository.Repository))
+					}
+					if counter == nQuayErrors {
+						return &quay.Repository{Name: repository.Repository}, nil
+					}
+				}
+				createRepositoryFuncInvocations[imageIndex]++
+				return nil, fmt.Errorf("quay error on %s repository creation", repository.Repository)
+			}
+
+			CreateRobotAccountFunc = func(organization, robotName string) (*quay.RobotAccount, error) {
+				defer GinkgoRecover()
+				Expect(organization).To(Equal(testQuayOrg))
+				Expect(robotName).To(HavePrefix(expectedRobotAccountPrefix))
+				imageIndex, err := strconv.Atoi(strings.TrimPrefix(robotName, expectedRobotAccountPrefix)[0:1])
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(createRepositoryFuncInvocations[imageIndex]).To(Equal(nQuayErrors))
+
+				if strings.HasSuffix(robotName, "_pull") {
+					if counter, exists := createPullRobotAccountInvocations[imageIndex]; !exists {
+						createPullRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter > nQuayErrors {
+							Fail(fmt.Sprintf("Invoked create pull robot account %s after success", robotName))
+						}
+						if counter == nQuayErrors {
+							return &quay.RobotAccount{Name: robotName, Token: pullToken}, nil
+						}
+					}
+					createPullRobotAccountInvocations[imageIndex]++
+					return nil, fmt.Errorf("quay error on %s pull robot account creation", robotName)
+				} else {
+					if counter, exists := createPushRobotAccountInvocations[imageIndex]; !exists {
+						createPushRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter > nQuayErrors {
+							Fail(fmt.Sprintf("Invoked create push robot account %s after success", robotName))
+						}
+						if counter == nQuayErrors {
+							return &quay.RobotAccount{Name: robotName, Token: pushToken}, nil
+						}
+					}
+					createPushRobotAccountInvocations[imageIndex]++
+					return nil, fmt.Errorf("quay error on %s push robot account creation", robotName)
+				}
+			}
+
+			AddPermissionsForRepositoryToRobotAccountFunc = func(organization, imageRepository, robotAccountName string, isWrite bool) error {
+				defer GinkgoRecover()
+				Expect(organization).To(Equal(testQuayOrg))
+				Expect(imageRepository).To(HavePrefix(expectedImageName))
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
+				imageIndex, err := strconv.Atoi(strings.TrimPrefix(robotAccountName, expectedRobotAccountPrefix)[0:1])
+				Expect(err).ToNot(HaveOccurred())
+
+				if strings.HasSuffix(robotAccountName, "_pull") {
+					Expect(createPullRobotAccountInvocations[imageIndex]).To(Equal(nQuayErrors))
+					Expect(isWrite).To(BeFalse())
+					if counter, exists := addPullPermissionsToRobotAccountInvocations[imageIndex]; !exists {
+						addPullPermissionsToRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter > nQuayErrors {
+							Fail(fmt.Sprintf("Invoked add permissions for pull robot account %s after success", robotAccountName))
+						}
+						if counter == nQuayErrors {
+							return nil
+						}
+					}
+					addPullPermissionsToRobotAccountInvocations[imageIndex]++
+					return fmt.Errorf("quay error on %s add permissions for pull robot account", robotAccountName)
+				} else {
+					Expect(createPushRobotAccountInvocations[imageIndex]).To(Equal(nQuayErrors))
+					Expect(isWrite).To(BeTrue())
+					if counter, exists := addPushPermissionsToRobotAccountInvocations[imageIndex]; !exists {
+						addPushPermissionsToRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter > nQuayErrors {
+							Fail(fmt.Sprintf("Invoked add permissions for push robot account %s after success", robotAccountName))
+						}
+						if counter == nQuayErrors {
+							return nil
+						}
+					}
+					addPushPermissionsToRobotAccountInvocations[imageIndex]++
+					return fmt.Errorf("quay error on %s add permissions for push robot account", robotAccountName)
+				}
+			}
+
+			GetRobotAccountFunc = func(organization, robotAccountName string) (*quay.RobotAccount, error) {
+				defer GinkgoRecover()
+				Expect(organization).To(Equal(testQuayOrg))
+				Expect(robotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
+				imageIndex, err := strconv.Atoi(strings.TrimPrefix(robotAccountName, expectedRobotAccountPrefix)[0:1])
+				Expect(err).ToNot(HaveOccurred())
+
+				if strings.HasSuffix(robotAccountName, "_pull") {
+					if counter, exists := getPullRobotAccountInvocations[imageIndex]; !exists {
+						getPullRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter >= nQuayErrors {
+							return &quay.RobotAccount{Name: robotAccountName, Token: pullToken}, nil
+						}
+					}
+					getPullRobotAccountInvocations[imageIndex]++
+					return nil, fmt.Errorf("quay error on get %s robot account", robotAccountName)
+				} else {
+					if counter, exists := getPushRobotAccountInvocations[imageIndex]; !exists {
+						getPushRobotAccountInvocations[imageIndex] = 0
+					} else {
+						if counter >= nQuayErrors {
+							return &quay.RobotAccount{Name: robotAccountName, Token: pushToken}, nil
+						}
+					}
+					getPushRobotAccountInvocations[imageIndex]++
+					return nil, fmt.Errorf("quay error on get %s robot account", robotAccountName)
+				}
+			}
+
+			DeleteRobotAccountFunc = func(organization, robotAccountName string) (bool, error) {
+				return true, nil
+			}
+			DeleteRepositoryFunc = func(organization, imageRepository string) (bool, error) {
+				return true, nil
+			}
+
+			imageRepositoryKeys := make(map[int]types.NamespacedName)
+			for i := 1; i <= nImageRepositories; i++ {
+				key := resourceKey
+				key.Name = key.Name + fmt.Sprint(i)
+				imageRepositoryKeys[i] = key
+
+				createImageRepository(imageRepositoryConfig{
+					ResourceKey: &key,
+					ImageName:   fmt.Sprintf("%s/%s%d", defaultComponentApplication, defaultComponentName, i),
+					Labels: map[string]string{
+						ApplicationNameLabelName: defaultComponentApplication,
+						ComponentNameLabelName:   fmt.Sprintf("%s%d", defaultComponentName, i),
+					},
+				})
+			}
+			defer func() {
+				for i := 1; i <= nImageRepositories; i++ {
+					deleteImageRepository(imageRepositoryKeys[i])
+				}
+			}()
+
+			isAllInvocationsDone := func(invocations map[int]int) bool {
+				if len(invocations) != nImageRepositories {
+					return false
+				}
+				for _, val := range invocations {
+					if val != nQuayErrors {
+						return false
+					}
+				}
+				return true
+			}
+			Eventually(func() bool {
+				log.Info(fmt.Sprintf("PushPermissions: %v", addPushPermissionsToRobotAccountInvocations))
+				log.Info(fmt.Sprintf("PullPermissions: %v", addPullPermissionsToRobotAccountInvocations))
+				log.Info(fmt.Sprintf("Push get: %v", getPushRobotAccountInvocations))
+				log.Info(fmt.Sprintf("Pull get: %v", getPullRobotAccountInvocations))
+				return isAllInvocationsDone(addPushPermissionsToRobotAccountInvocations)
+			}, timeout, interval).Should(BeTrue())
+			Eventually(func() bool {
+				log.Info(fmt.Sprintf("PushPermissions: %v", addPushPermissionsToRobotAccountInvocations))
+				log.Info(fmt.Sprintf("PullPermissions: %v", addPullPermissionsToRobotAccountInvocations))
+				log.Info(fmt.Sprintf("Push get: %v", getPushRobotAccountInvocations))
+				log.Info(fmt.Sprintf("Pull get: %v", getPullRobotAccountInvocations))
+				return isAllInvocationsDone(addPullPermissionsToRobotAccountInvocations)
+			}, timeout, interval).Should(BeTrue())
+			Eventually(func() bool {
+				return isAllInvocationsDone(getPushRobotAccountInvocations)
+			}, timeout, interval).Should(BeTrue())
+			Eventually(func() bool {
+				return isAllInvocationsDone(getPullRobotAccountInvocations)
+			}, timeout, interval).Should(BeTrue())
+
+			for i := 1; i <= nImageRepositories; i++ {
+				key := imageRepositoryKeys[i]
+				waitImageRepositoryFinalizerOnImageRepository(key)
+				waitImageRepositoryStatus(key)
+
+				expectedRemoteSecretName = defaultComponentName + fmt.Sprint(i) + "-image-pull"
+
+				imageRepository := getImageRepository(key)
+				log.Info(fmt.Sprintf(">>>>>>>>>>>> STATUS: %#v", imageRepository.Status))
+				Expect(imageRepository.Spec.Image.Name).ToNot(BeEmpty())
+				Expect(imageRepository.Spec.Image.Visibility).To(Equal(imagerepositoryv1beta1.ImageVisibilityPublic))
+				Expect(imageRepository.Status.State).To(Equal(imagerepositoryv1beta1.ImageRepositoryStateReady))
+				Expect(imageRepository.Status.Message).To(BeEmpty())
+				Expect(imageRepository.Status.Image.URL).ToNot(BeEmpty())
+				Expect(imageRepository.Status.Image.Visibility).To(Equal(imagerepositoryv1beta1.ImageVisibilityPublic))
+				Expect(imageRepository.Status.Credentials.PushRobotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
+				Expect(imageRepository.Status.Credentials.PushSecretName).To(HavePrefix(strings.ReplaceAll(expectedImageName, "/", "-")))
+				Expect(imageRepository.Status.Credentials.PullRobotAccountName).To(HavePrefix(expectedRobotAccountPrefix))
+				Expect(imageRepository.Status.Credentials.PullRobotAccountName).To(HaveSuffix("_pull"))
+				Expect(imageRepository.Status.Credentials.PullSecretName).To(Equal(expectedRemoteSecretName))
+				Expect(imageRepository.Status.Credentials.GenerationTimestamp).ToNot(BeNil())
+
+				secret := &corev1.Secret{}
+				secretName := imageRepository.Status.Credentials.PushSecretName
+				secretKey := types.NamespacedName{Name: secretName, Namespace: defaultNamespace}
+				waitSecretExist(secretKey)
+				Expect(k8sClient.Get(ctx, secretKey, secret)).To(Succeed())
+				dockerconfigJson := string(secret.Data[corev1.DockerConfigJsonKey])
+				Expect(dockerconfigJson).ToNot(BeNil())
+				var authDataJson interface{}
+				Expect(json.Unmarshal([]byte(dockerconfigJson), &authDataJson)).To(Succeed())
+
+				remoteSecretKey := types.NamespacedName{Name: expectedRemoteSecretName, Namespace: defaultNamespace}
+				remoteSecret := waitRemoteSecretExist(remoteSecretKey)
+				Expect(remoteSecret.Labels[ApplicationNameLabelName]).To(Equal(defaultComponentApplication))
+				Expect(remoteSecret.Labels[ComponentNameLabelName]).To(Equal(defaultComponentName + fmt.Sprint(i)))
+				Expect(remoteSecret.OwnerReferences).To(HaveLen(1))
+				Expect(remoteSecret.OwnerReferences[0].Name).To(Equal(imageRepository.Name))
+				Expect(remoteSecret.OwnerReferences[0].Kind).To(Equal("ImageRepository"))
+				Expect(remoteSecret.Spec.Secret.Name).To(Equal(remoteSecretKey.Name))
+				Expect(remoteSecret.Spec.Secret.Type).To(Equal(corev1.SecretTypeDockerConfigJson))
+				Expect(remoteSecret.Spec.Secret.LinkedTo).To(HaveLen(1))
+				Expect(remoteSecret.Spec.Secret.LinkedTo[0].ServiceAccount.Reference.Name).To(Equal(defaultServiceAccountName))
+
+				uploadSecretKey := types.NamespacedName{Name: "upload-secret-" + expectedRemoteSecretName, Namespace: defaultNamespace}
+				uploadSecret := waitSecretExist(uploadSecretKey)
+				defer deleteSecret(uploadSecretKey)
+				Expect(uploadSecret.Labels[remotesecretv1beta1.UploadSecretLabel]).To(Equal("remotesecret"))
+				Expect(uploadSecret.Annotations[remotesecretv1beta1.RemoteSecretNameAnnotation]).To(Equal(expectedRemoteSecretName))
+				uploadSecretDockerconfigJson := string(uploadSecret.Data[corev1.DockerConfigJsonKey])
+				Expect(uploadSecretDockerconfigJson).ToNot(BeEmpty())
+			}
+		})
+	})
+
 	Context("Image repository error scenarios", func() {
 
 		It("should prepare environment", func() {
+			deleteImageRepository(resourceKey)
+
 			pushToken = "push-token1234"
 			expectedImageName = fmt.Sprintf("%s-%s", defaultNamespace, defaultImageRepositoryName)
 			expectedImage = fmt.Sprintf("quay.io/%s/%s", testQuayOrg, expectedImageName)

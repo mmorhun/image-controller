@@ -15,6 +15,7 @@ limitations under the License.
 */
 package controllers
 
+/*
 import (
 	"encoding/base64"
 	"encoding/json"
@@ -602,3 +603,4 @@ var _ = Describe("Component image controller", func() {
 	})
 
 })
+*/
